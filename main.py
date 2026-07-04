@@ -1,263 +1,201 @@
-import os
-import asyncio
-import base64
-import httpx
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import os, asyncio, base64, httpx
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 
-TOKEN     = os.environ.get("BOT_TOKEN", "")
+API_ID    = int(os.environ.get("API_ID", 0))
+API_HASH  = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 GH_TOKEN  = os.environ.get("GH_TOKEN", "")
 GH_REPO   = os.environ.get("GH_REPO", "tajhatAti/Bot")
 GH_BRANCH = os.environ.get("GH_BRANCH", "main")
 OWNER_ID  = int(os.environ.get("OWNER_ID", 0))
 
-BASE_PATH = "plugins"
-GH_API    = "https://api.github.com"
-
-# State per user
+BASE = "plugins"
+GH_API = "https://api.github.com"
 state = {}
-# state[uid] = {
-#   "mode": "new" | "edit",
-#   "filename": "ping.py",
-#   "original": "...existing code..." (only for edit)
-# }
 
-def gh_headers():
-    return {
-        "Authorization": f"token {GH_TOKEN}",
-        "Content-Type": "application/json"
-    }
+bot = TelegramClient("github_manager_bot", API_ID, API_HASH)
 
-def full_path(filename: str) -> str:
-    filename = filename.strip().lstrip("/")
-    if not filename.startswith(BASE_PATH + "/"):
-        filename = f"{BASE_PATH}/{filename}"
-    return filename
+def headers():
+    return {"Authorization": f"token {GH_TOKEN}", "Content-Type": "application/json"}
 
-async def get_file(path: str):
+def full_path(name: str) -> str:
+    name = name.strip().lstrip("/")
+    if not name.startswith(BASE + "/"):
+        name = f"{BASE}/{name}"
+    return name
+
+async def gh_get(path: str):
     url = f"{GH_API}/repos/{GH_REPO}/contents/{path}"
     async with httpx.AsyncClient() as c:
-        r = await c.get(url, headers=gh_headers())
-        if r.status_code == 200:
-            return r.json()
-    return None
+        r = await c.get(url, headers=headers())
+        return r.json() if r.status_code == 200 else None
 
-async def upload_file(path: str, content: bytes, msg: str) -> bool:
+async def gh_upload(path: str, content: bytes, msg: str) -> bool:
     url  = f"{GH_API}/repos/{GH_REPO}/contents/{path}"
     data = {
         "message": msg,
         "content": base64.b64encode(content).decode(),
         "branch":  GH_BRANCH
     }
-    existing = await get_file(path)
-    if existing:
+    existing = await gh_get(path)
+    if existing and "sha" in existing:
         data["sha"] = existing["sha"]
     async with httpx.AsyncClient() as c:
-        r = await c.put(url, headers=gh_headers(), json=data)
+        r = await c.put(url, headers=headers(), json=data)
         return r.status_code in (200, 201)
 
-async def delete_file(path: str) -> bool:
-    existing = await get_file(path)
-    if not existing:
+async def gh_delete(path: str) -> bool:
+    existing = await gh_get(path)
+    if not existing or "sha" not in existing:
         return False
     url  = f"{GH_API}/repos/{GH_REPO}/contents/{path}"
-    data = {
-        "message": f"Delete {path} via bot",
-        "sha":     existing["sha"],
-        "branch":  GH_BRANCH
-    }
+    data = {"message": f"Delete {path} via bot", "sha": existing["sha"], "branch": GH_BRANCH}
     async with httpx.AsyncClient() as c:
-        r = await c.delete(url, headers=gh_headers(), json=data)
+        r = await c.delete(url, headers=headers(), json=data)
         return r.status_code == 200
 
-def check(update: Update) -> bool:
-    return update.effective_user.id == OWNER_ID
+def owner(e):
+    return e.sender_id == OWNER_ID
 
 # ── /start ────────────────────────────────────────────────────────────────────
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not check(update): return
-    await update.message.reply_text(
+@bot.on(events.NewMessage(pattern="^/start$"))
+async def _(e):
+    if not owner(e): return
+    await e.reply(
         "**GitHub File Manager**\n"
-        f"Base path: `{BASE_PATH}/`\n\n"
-        "Commands:\n"
-        "`/new filename.py` — নতুন file তৈরি\n"
-        "`/edit filename.py` — existing file edit\n"
+        f"Base: `{BASE}/`\n\n"
+        "`/new filename.py` — নতুন file\n"
+        "`/edit filename.py` — file edit\n"
         "`/rem filename.py` — file delete\n"
         "`/ls` — সব file দেখো\n"
-        "`/cat filename.py` — file content দেখো\n"
-        "`/cancel` — current action বাতিল\n\n"
-        "Flow:\n"
-        "1. `/new ping.py` দাও\n"
+        "`/cat filename.py` — content দেখো\n"
+        "`/cancel` — বাতিল\n\n"
+        "**Flow:**\n"
+        "1. `/new ping.py`\n"
         "2. Code plain text এ পাঠাও\n"
-        "3. Upload হবে `plugins/ping.py` তে\n"
-        "4. আবার নতুন file এর জন্য `/new` দাও",
-        parse_mode="Markdown"
+        "3. Upload হবে `plugins/ping.py` তে"
     )
 
 # ── /new ──────────────────────────────────────────────────────────────────────
-async def new_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not check(update): return
-    uid = update.effective_user.id
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/new filename.py`", parse_mode="Markdown")
-        return
-    filename = ctx.args[0].strip()
+@bot.on(events.NewMessage(pattern=r"^/new (.+)"))
+async def _(e):
+    if not owner(e): return
+    filename = e.pattern_match.group(1).strip()
     path     = full_path(filename)
-    state[uid] = {"mode": "new", "filename": filename, "path": path}
-    await update.message.reply_text(
-        f"✅ File: `{path}`\n\nএবার code plain text এ পাঠাও।\nবাতিল করতে /cancel",
-        parse_mode="Markdown"
+    state[e.sender_id] = {"mode": "new", "path": path}
+    await e.reply(
+        f"✅ Path: `{path}`\n\nCode plain text এ পাঠাও।\nবাতিল: /cancel"
     )
 
 # ── /edit ─────────────────────────────────────────────────────────────────────
-async def edit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not check(update): return
-    uid = update.effective_user.id
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/edit filename.py`", parse_mode="Markdown")
-        return
-    filename = ctx.args[0].strip()
+@bot.on(events.NewMessage(pattern=r"^/edit (.+)"))
+async def _(e):
+    if not owner(e): return
+    filename = e.pattern_match.group(1).strip()
     path     = full_path(filename)
-    msg      = await update.message.reply_text(f"Fetching `{path}`...", parse_mode="Markdown")
-    existing = await get_file(path)
-    if not existing:
-        await msg.edit_text(f"❌ File not found: `{path}`", parse_mode="Markdown")
+    msg      = await e.reply(f"Fetching `{path}`...")
+    existing = await gh_get(path)
+    if not existing or "content" not in existing:
+        await msg.edit(f"❌ Not found: `{path}`")
         return
-    original = base64.b64decode(existing["content"]).decode(errors="replace")
-    state[uid] = {"mode": "edit", "filename": filename, "path": path, "original": original}
-    # File content পাঠাবো যাতে user copy করে edit করতে পারে
-    if len(original) > 3800:
-        preview = original[:3800] + "\n...(truncated)"
-    else:
-        preview = original
-    await msg.edit_text(
-        f"📄 Current content of `{path}`:\n\n"
+    content = base64.b64decode(existing["content"]).decode(errors="replace")
+    state[e.sender_id] = {"mode": "edit", "path": path}
+    preview = content[:3500] + "\n...(truncated)" if len(content) > 3500 else content
+    await msg.edit(
+        f"📄 `{path}` current content:\n\n"
         f"```\n{preview}\n```\n\n"
-        f"Edited code plain text এ পাঠাও। /cancel বাতিল করতে।",
-        parse_mode="Markdown"
+        f"Edited code plain text এ পাঠাও। /cancel বাতিল।"
     )
 
 # ── /rem ──────────────────────────────────────────────────────────────────────
-async def rem_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not check(update): return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/rem filename.py`", parse_mode="Markdown")
-        return
-    filename = ctx.args[0].strip()
-    path     = full_path(filename)
-    msg      = await update.message.reply_text(f"Deleting `{path}`...", parse_mode="Markdown")
-    success  = await delete_file(path)
-    if success:
-        await msg.edit_text(f"✅ Deleted: `{path}`", parse_mode="Markdown")
-    else:
-        await msg.edit_text(f"❌ Not found or failed: `{path}`", parse_mode="Markdown")
+@bot.on(events.NewMessage(pattern=r"^/rem (.+)"))
+async def _(e):
+    if not owner(e): return
+    path = full_path(e.pattern_match.group(1).strip())
+    msg  = await e.reply(f"Deleting `{path}`...")
+    ok   = await gh_delete(path)
+    await msg.edit(f"✅ Deleted: `{path}`" if ok else f"❌ Not found: `{path}`")
 
 # ── /ls ───────────────────────────────────────────────────────────────────────
-async def ls_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not check(update): return
-    path = BASE_PATH
-    if ctx.args:
-        path = full_path(ctx.args[0])
-    url = f"{GH_API}/repos/{GH_REPO}/contents/{path}"
+@bot.on(events.NewMessage(pattern=r"^/ls(.*)"))
+async def _(e):
+    if not owner(e): return
+    arg  = e.pattern_match.group(1).strip()
+    path = full_path(arg) if arg else BASE
+    url  = f"{GH_API}/repos/{GH_REPO}/contents/{path}"
     async with httpx.AsyncClient() as c:
-        r = await c.get(url, headers=gh_headers())
+        r = await c.get(url, headers=headers())
     if r.status_code != 200:
-        await update.message.reply_text("❌ Path not found.")
+        await e.reply("❌ Path not found.")
         return
     items = r.json()
     if not isinstance(items, list):
-        await update.message.reply_text("❌ Not a directory.")
+        await e.reply("❌ Not a directory.")
         return
-    lines = []
-    for item in items:
-        icon = "📁" if item["type"] == "dir" else "📄"
-        lines.append(f"{icon} `{item['name']}`")
-    text = f"**{path}/**\n\n" + "\n".join(lines) if lines else f"**{path}/** is empty."
-    await update.message.reply_text(text, parse_mode="Markdown")
+    lines = [("📁 " if i["type"] == "dir" else "📄 ") + f"`{i['name']}`" for i in items]
+    await e.reply(f"**{path}/**\n\n" + "\n".join(lines) if lines else f"**{path}/** is empty.")
 
 # ── /cat ──────────────────────────────────────────────────────────────────────
-async def cat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not check(update): return
-    if not ctx.args:
-        await update.message.reply_text("Usage: `/cat filename.py`", parse_mode="Markdown")
-        return
-    path     = full_path(ctx.args[0])
-    existing = await get_file(path)
-    if not existing:
-        await update.message.reply_text(f"❌ Not found: `{path}`", parse_mode="Markdown")
+@bot.on(events.NewMessage(pattern=r"^/cat (.+)"))
+async def _(e):
+    if not owner(e): return
+    path     = full_path(e.pattern_match.group(1).strip())
+    existing = await gh_get(path)
+    if not existing or "content" not in existing:
+        await e.reply(f"❌ Not found: `{path}`")
         return
     content = base64.b64decode(existing["content"]).decode(errors="replace")
     if len(content) > 3800:
         content = content[:3800] + "\n...(truncated)"
-    await update.message.reply_text(f"```\n{content}\n```", parse_mode="Markdown")
+    await e.reply(f"```\n{content}\n```")
 
 # ── /cancel ───────────────────────────────────────────────────────────────────
-async def cancel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not check(update): return
-    uid = update.effective_user.id
-    if uid in state:
-        del state[uid]
-        await update.message.reply_text("❌ Cancelled.")
+@bot.on(events.NewMessage(pattern="^/cancel$"))
+async def _(e):
+    if not owner(e): return
+    if e.sender_id in state:
+        del state[e.sender_id]
+        await e.reply("❌ Cancelled.")
     else:
-        await update.message.reply_text("কোনো active action নেই।")
+        await e.reply("কোনো active action নেই।")
 
-# ── TEXT HANDLER (code receive) ───────────────────────────────────────────────
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not check(update): return
-    uid  = update.effective_user.id
-    text = update.message.text.strip()
-
+# ── TEXT (code receive) ───────────────────────────────────────────────────────
+@bot.on(events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and e.text and not e.text.startswith("/")))
+async def _(e):
+    uid = e.sender_id
     if uid not in state:
-        await update.message.reply_text(
-            "কোনো file select করা নেই।\n`/new filename.py` দিয়ে শুরু করো।",
-            parse_mode="Markdown"
-        )
+        await e.reply("কোনো file select নেই।\n`/new filename.py` দিয়ে শুরু করো।")
         return
 
     s    = state[uid]
     path = s["path"]
     mode = s["mode"]
+    msg  = await e.reply(f"{'Creating' if mode == 'new' else 'Updating'} `{path}`...")
 
-    msg = await update.message.reply_text(
-        f"{'Creating' if mode == 'new' else 'Updating'} `{path}`...",
-        parse_mode="Markdown"
-    )
-
-    success = await upload_file(
+    ok = await gh_upload(
         path    = path,
-        content = text.encode(),
+        content = e.text.encode(),
         msg     = f"{'Add' if mode == 'new' else 'Update'} {path} via Telegram bot"
     )
 
-    if success:
-        url = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
+    if ok:
+        url    = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
         action = "Created" if mode == "new" else "Updated"
-        await msg.edit_text(
+        del state[uid]
+        await msg.edit(
             f"✅ {action}: `{path}`\n\n"
             f"[GitHub এ দেখো]({url})\n\n"
-            f"নতুন file এর জন্য `/new filename.py` দাও।",
-            parse_mode="Markdown",
-            disable_web_page_preview=True
+            f"নতুন file: `/new filename.py`"
         )
-        del state[uid]
     else:
-        await msg.edit_text(
-            "❌ Failed. GH_TOKEN এর `repo` permission আছে কিনা চেক করো।"
-        )
+        await msg.edit("❌ Failed. GH_TOKEN এর `repo` permission চেক করো।")
 
 # ── BOOTSTRAP ─────────────────────────────────────────────────────────────────
-def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start",   start))
-    app.add_handler(CommandHandler("new",     new_cmd))
-    app.add_handler(CommandHandler("edit",    edit_cmd))
-    app.add_handler(CommandHandler("rem",     rem_cmd))
-    app.add_handler(CommandHandler("ls",      ls_cmd))
-    app.add_handler(CommandHandler("cat",     cat_cmd))
-    app.add_handler(CommandHandler("cancel",  cancel_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    print("[+] GitHub Manager Bot running...")
-    app.run_polling(drop_pending_updates=True)
+async def main():
+    await bot.start(bot_token=BOT_TOKEN)
+    print("[+] GitHub Manager Bot online.")
+    await bot.run_until_disconnected()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
