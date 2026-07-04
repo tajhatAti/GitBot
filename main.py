@@ -210,7 +210,7 @@ async def _(e):
             await msg.edit(
                 f"✅ {action}: `{path}`\n\n"
                 f"[GitHub এ দেখো]({url})\n\n"
-                f"নতুন file: `/new`\nEdit: `/edit`"
+                f"নতুন file: /new\nEdit: `/edit`"
             )
         else:
             await msg.edit("❌ Failed. GH_TOKEN এর `repo` permission চেক করো।")
