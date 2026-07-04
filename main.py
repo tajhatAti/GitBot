@@ -12,7 +12,9 @@ OWNER_ID  = int(os.environ.get("OWNER_ID", 0))
 
 BASE   = "plugins"
 GH_API = "https://api.github.com"
-state  = {}
+
+# state[uid] = {"step": "filename"|"content"|"edit_content", "path": "..."}
+state = {}
 
 bot = TelegramClient("github_bot", API_ID, API_HASH)
 
@@ -68,47 +70,37 @@ async def gh_delete(path: str) -> bool:
 def owner(e):
     return e.sender_id == OWNER_ID
 
+# ── /start ────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern="^/start$"))
 async def _(e):
     if not owner(e): return
     await e.reply(
         "**GitHub File Manager**\n"
-        f"Base: `{BASE}/`\n\n"
-        "`/new filename.py` — নতুন file\n"
-        "`/edit filename.py` — file edit\n"
+        f"Base path: `{BASE}/`\n\n"
+        "Commands:\n"
+        "`/new` — নতুন file create\n"
+        "`/edit` — existing file edit\n"
         "`/rem filename.py` — file delete\n"
         "`/ls` — সব file দেখো\n"
         "`/cat filename.py` — content দেখো\n"
-        "`/cancel` — বাতিল\n\n"
-        "**Flow:**\n"
-        "1. `/new ping.py`\n"
-        "2. Code plain text এ পাঠাও\n"
-        "3. `plugins/ping.py` তে upload হবে"
+        "`/cancel` — বাতিল"
     )
 
-@bot.on(events.NewMessage(pattern=r"^/new (.+)"))
+# ── /new ──────────────────────────────────────────────────────────────────────
+@bot.on(events.NewMessage(pattern="^/new$"))
 async def _(e):
     if not owner(e): return
-    path = full_path(e.pattern_match.group(1).strip())
-    state[e.sender_id] = {"mode": "new", "path": path}
-    await e.reply(f"✅ Path: `{path}`\n\nCode plain text এ পাঠাও।\nবাতিল: /cancel")
+    state[e.sender_id] = {"step": "filename", "mode": "new"}
+    await e.reply("📁 File name দাও:\n_(example: `ping.py`)_")
 
-@bot.on(events.NewMessage(pattern=r"^/edit (.+)"))
+# ── /edit ─────────────────────────────────────────────────────────────────────
+@bot.on(events.NewMessage(pattern="^/edit$"))
 async def _(e):
     if not owner(e): return
-    path     = full_path(e.pattern_match.group(1).strip())
-    msg      = await e.reply(f"Fetching `{path}`...")
-    existing = await gh_get(path)
-    if not existing or "content" not in existing:
-        await msg.edit(f"❌ Not found: `{path}`")
-        return
-    content = base64.b64decode(existing["content"]).decode(errors="replace")
-    state[e.sender_id] = {"mode": "edit", "path": path}
-    preview = content[:3500] + "\n...(truncated)" if len(content) > 3500 else content
-    await msg.edit(
-        f"📄 `{path}`:\n\n```\n{preview}\n```\n\nEdited code পাঠাও। /cancel বাতিল।"
-    )
+    state[e.sender_id] = {"step": "filename", "mode": "edit"}
+    await e.reply("✏️ Edit করতে file name দাও:\n_(example: `ping.py`)_")
 
+# ── /rem ──────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/rem (.+)"))
 async def _(e):
     if not owner(e): return
@@ -117,6 +109,7 @@ async def _(e):
     ok   = await gh_delete(path)
     await msg.edit(f"✅ Deleted: `{path}`" if ok else f"❌ Not found: `{path}`")
 
+# ── /ls ───────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/ls(.*)"))
 async def _(e):
     if not owner(e): return
@@ -135,6 +128,7 @@ async def _(e):
     lines = [("📁 " if i["type"] == "dir" else "📄 ") + f"`{i['name']}`" for i in items]
     await e.reply(f"**{path}/**\n\n" + "\n".join(lines) if lines else f"**{path}/** is empty.")
 
+# ── /cat ──────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/cat (.+)"))
 async def _(e):
     if not owner(e): return
@@ -148,6 +142,7 @@ async def _(e):
         content = content[:3800] + "\n...(truncated)"
     await e.reply(f"```\n{content}\n```")
 
+# ── /cancel ───────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern="^/cancel$"))
 async def _(e):
     if not owner(e): return
@@ -157,33 +152,71 @@ async def _(e):
     else:
         await e.reply("কোনো active action নেই।")
 
+# ── TEXT HANDLER ──────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and bool(e.text) and not e.text.startswith("/")))
 async def _(e):
-    uid = e.sender_id
-    if uid not in state:
-        await e.reply("কোনো file select নেই।\n`/new filename.py` দিয়ে শুরু করো।")
-        return
-    s    = state[uid]
-    path = s["path"]
-    mode = s["mode"]
-    msg  = await e.reply(f"{'Creating' if mode == 'new' else 'Updating'} `{path}`...")
-    ok   = await gh_upload(
-        path    = path,
-        content = e.text.encode(),
-        msg     = f"{'Add' if mode == 'new' else 'Update'} {path} via bot"
-    )
-    if ok:
-        url    = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
-        action = "Created" if mode == "new" else "Updated"
-        del state[uid]
-        await msg.edit(
-            f"✅ {action}: `{path}`\n\n"
-            f"[GitHub এ দেখো]({url})\n\n"
-            f"নতুন file: `/new filename.py`"
-        )
-    else:
-        await msg.edit("❌ Failed. GH_TOKEN এর `repo` permission চেক করো।")
+    uid  = e.sender_id
+    text = e.text.strip()
 
+    if uid not in state:
+        await e.reply("কোনো action নেই।\n`/new` বা `/edit` দিয়ে শুরু করো।")
+        return
+
+    s    = state[uid]
+    step = s["step"]
+    mode = s["mode"]
+
+    # ── Step 1: filename নেওয়া ──
+    if step == "filename":
+        path       = full_path(text)
+        s["path"]  = path
+        s["step"]  = "content"
+
+        if mode == "edit":
+            msg      = await e.reply(f"Fetching `{path}`...")
+            existing = await gh_get(path)
+            if not existing or "content" not in existing:
+                await msg.edit(f"❌ Not found: `{path}`\n\nআবার চেষ্টা করো বা /cancel দাও।")
+                del state[uid]
+                return
+            content = base64.b64decode(existing["content"]).decode(errors="replace")
+            preview = content[:3500] + "\n...(truncated)" if len(content) > 3500 else content
+            s["step"] = "edit_content"
+            await msg.edit(
+                f"📄 `{path}` current content:\n\n"
+                f"```\n{preview}\n```\n\n"
+                f"Edited code plain text এ পাঠাও।\n/cancel বাতিল।"
+            )
+        else:
+            await e.reply(
+                f"✅ File: `{path}`\n\n"
+                f"Code plain text এ পাঠাও।\n/cancel বাতিল।"
+            )
+        return
+
+    # ── Step 2: content নেওয়া ও upload ──
+    if step in ("content", "edit_content"):
+        path = s["path"]
+        msg  = await e.reply(f"{'Creating' if mode == 'new' else 'Updating'} `{path}`...")
+        ok   = await gh_upload(
+            path    = path,
+            content = text.encode(),
+            msg     = f"{'Add' if mode == 'new' else 'Update'} {path} via bot"
+        )
+        if ok:
+            url    = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
+            action = "Created" if mode == "new" else "Updated"
+            del state[uid]
+            await msg.edit(
+                f"✅ {action}: `{path}`\n\n"
+                f"[GitHub এ দেখো]({url})\n\n"
+                f"নতুন file: `/new`\nEdit: `/edit`"
+            )
+        else:
+            await msg.edit("❌ Failed. GH_TOKEN এর `repo` permission চেক করো।")
+        return
+
+# ── BOOTSTRAP ─────────────────────────────────────────────────────────────────
 async def main():
     threading.Thread(target=run_server, daemon=True).start()
     await bot.start(bot_token=BOT_TOKEN)
