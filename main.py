@@ -1,22 +1,32 @@
-import os, asyncio, base64, httpx
+import os, asyncio, base64, threading, httpx
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events
-from telethon.sessions import StringSession
 
-API_ID    = int(os.environ.get("API_ID", 0))
-API_HASH  = os.environ.get("API_HASH", "")
+API_ID    = int(os.environ.get("API_ID", "12345"))
+API_HASH  = os.environ.get("API_HASH", "placeholder")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 GH_TOKEN  = os.environ.get("GH_TOKEN", "")
 GH_REPO   = os.environ.get("GH_REPO", "tajhatAti/Bot")
 GH_BRANCH = os.environ.get("GH_BRANCH", "main")
 OWNER_ID  = int(os.environ.get("OWNER_ID", 0))
 
-BASE = "plugins"
+BASE   = "plugins"
 GH_API = "https://api.github.com"
-state = {}
+state  = {}
 
-bot = TelegramClient("github_manager_bot", API_ID, API_HASH)
+bot = TelegramClient("github_bot", API_ID, API_HASH)
 
-def headers():
+class _H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, *a): pass
+
+def run_server():
+    HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), _H).serve_forever()
+
+def gh_headers():
     return {"Authorization": f"token {GH_TOKEN}", "Content-Type": "application/json"}
 
 def full_path(name: str) -> str:
@@ -28,7 +38,7 @@ def full_path(name: str) -> str:
 async def gh_get(path: str):
     url = f"{GH_API}/repos/{GH_REPO}/contents/{path}"
     async with httpx.AsyncClient() as c:
-        r = await c.get(url, headers=headers())
+        r = await c.get(url, headers=gh_headers())
         return r.json() if r.status_code == 200 else None
 
 async def gh_upload(path: str, content: bytes, msg: str) -> bool:
@@ -42,7 +52,7 @@ async def gh_upload(path: str, content: bytes, msg: str) -> bool:
     if existing and "sha" in existing:
         data["sha"] = existing["sha"]
     async with httpx.AsyncClient() as c:
-        r = await c.put(url, headers=headers(), json=data)
+        r = await c.put(url, headers=gh_headers(), json=data)
         return r.status_code in (200, 201)
 
 async def gh_delete(path: str) -> bool:
@@ -52,13 +62,12 @@ async def gh_delete(path: str) -> bool:
     url  = f"{GH_API}/repos/{GH_REPO}/contents/{path}"
     data = {"message": f"Delete {path} via bot", "sha": existing["sha"], "branch": GH_BRANCH}
     async with httpx.AsyncClient() as c:
-        r = await c.delete(url, headers=headers(), json=data)
+        r = await c.delete(url, headers=gh_headers(), json=data)
         return r.status_code == 200
 
 def owner(e):
     return e.sender_id == OWNER_ID
 
-# ── /start ────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern="^/start$"))
 async def _(e):
     if not owner(e): return
@@ -74,26 +83,20 @@ async def _(e):
         "**Flow:**\n"
         "1. `/new ping.py`\n"
         "2. Code plain text এ পাঠাও\n"
-        "3. Upload হবে `plugins/ping.py` তে"
+        "3. `plugins/ping.py` তে upload হবে"
     )
 
-# ── /new ──────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/new (.+)"))
 async def _(e):
     if not owner(e): return
-    filename = e.pattern_match.group(1).strip()
-    path     = full_path(filename)
+    path = full_path(e.pattern_match.group(1).strip())
     state[e.sender_id] = {"mode": "new", "path": path}
-    await e.reply(
-        f"✅ Path: `{path}`\n\nCode plain text এ পাঠাও।\nবাতিল: /cancel"
-    )
+    await e.reply(f"✅ Path: `{path}`\n\nCode plain text এ পাঠাও।\nবাতিল: /cancel")
 
-# ── /edit ─────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/edit (.+)"))
 async def _(e):
     if not owner(e): return
-    filename = e.pattern_match.group(1).strip()
-    path     = full_path(filename)
+    path     = full_path(e.pattern_match.group(1).strip())
     msg      = await e.reply(f"Fetching `{path}`...")
     existing = await gh_get(path)
     if not existing or "content" not in existing:
@@ -103,12 +106,9 @@ async def _(e):
     state[e.sender_id] = {"mode": "edit", "path": path}
     preview = content[:3500] + "\n...(truncated)" if len(content) > 3500 else content
     await msg.edit(
-        f"📄 `{path}` current content:\n\n"
-        f"```\n{preview}\n```\n\n"
-        f"Edited code plain text এ পাঠাও। /cancel বাতিল।"
+        f"📄 `{path}`:\n\n```\n{preview}\n```\n\nEdited code পাঠাও। /cancel বাতিল।"
     )
 
-# ── /rem ──────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/rem (.+)"))
 async def _(e):
     if not owner(e): return
@@ -117,7 +117,6 @@ async def _(e):
     ok   = await gh_delete(path)
     await msg.edit(f"✅ Deleted: `{path}`" if ok else f"❌ Not found: `{path}`")
 
-# ── /ls ───────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/ls(.*)"))
 async def _(e):
     if not owner(e): return
@@ -125,7 +124,7 @@ async def _(e):
     path = full_path(arg) if arg else BASE
     url  = f"{GH_API}/repos/{GH_REPO}/contents/{path}"
     async with httpx.AsyncClient() as c:
-        r = await c.get(url, headers=headers())
+        r = await c.get(url, headers=gh_headers())
     if r.status_code != 200:
         await e.reply("❌ Path not found.")
         return
@@ -136,7 +135,6 @@ async def _(e):
     lines = [("📁 " if i["type"] == "dir" else "📄 ") + f"`{i['name']}`" for i in items]
     await e.reply(f"**{path}/**\n\n" + "\n".join(lines) if lines else f"**{path}/** is empty.")
 
-# ── /cat ──────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/cat (.+)"))
 async def _(e):
     if not owner(e): return
@@ -150,7 +148,6 @@ async def _(e):
         content = content[:3800] + "\n...(truncated)"
     await e.reply(f"```\n{content}\n```")
 
-# ── /cancel ───────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern="^/cancel$"))
 async def _(e):
     if not owner(e): return
@@ -160,25 +157,21 @@ async def _(e):
     else:
         await e.reply("কোনো active action নেই।")
 
-# ── TEXT (code receive) ───────────────────────────────────────────────────────
-@bot.on(events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and e.text and not e.text.startswith("/")))
+@bot.on(events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and bool(e.text) and not e.text.startswith("/")))
 async def _(e):
     uid = e.sender_id
     if uid not in state:
         await e.reply("কোনো file select নেই।\n`/new filename.py` দিয়ে শুরু করো।")
         return
-
     s    = state[uid]
     path = s["path"]
     mode = s["mode"]
     msg  = await e.reply(f"{'Creating' if mode == 'new' else 'Updating'} `{path}`...")
-
-    ok = await gh_upload(
+    ok   = await gh_upload(
         path    = path,
         content = e.text.encode(),
-        msg     = f"{'Add' if mode == 'new' else 'Update'} {path} via Telegram bot"
+        msg     = f"{'Add' if mode == 'new' else 'Update'} {path} via bot"
     )
-
     if ok:
         url    = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
         action = "Created" if mode == "new" else "Updated"
@@ -191,8 +184,8 @@ async def _(e):
     else:
         await msg.edit("❌ Failed. GH_TOKEN এর `repo` permission চেক করো।")
 
-# ── BOOTSTRAP ─────────────────────────────────────────────────────────────────
 async def main():
+    threading.Thread(target=run_server, daemon=True).start()
     await bot.start(bot_token=BOT_TOKEN)
     print("[+] GitHub Manager Bot online.")
     await bot.run_until_disconnected()
