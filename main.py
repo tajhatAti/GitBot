@@ -159,7 +159,7 @@ async def _(e):
 async def _(e):
     if not owner(e): return
     state[e.sender_id] = {"step": "filename", "mode": "new"}
-    await e.reply("📁 File name দাও:\n_(example: `ping.py`)_")
+    await e.reply("📁 File's 🗃️ name দাও:\n_(example: `ping.py`)_")
 
 @bot.on(events.NewMessage(pattern="^/edit$"))
 async def _(e):
