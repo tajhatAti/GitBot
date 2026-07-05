@@ -115,7 +115,10 @@ async def auto_fix_cmd(e):
     try:
         # জেমিনি কনফিগারেশন (ফাইলের শুরুর ভেরিয়েবলটি ব্যবহার করা হয়েছে)
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel(
+    model_name="models/gemini-1.5-flash",
+    generation_config={"api_version": "v1beta"}
+        )
         
         prompt = f"""
         You are an expert Python developer working with Telethon.
