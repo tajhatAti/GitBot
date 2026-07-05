@@ -69,42 +69,70 @@ async def gh_delete(path: str) -> bool:
 async def ai_fix(code: str) -> str:
     if not GROK_KEY:
         raise Exception("GROK_API_KEY not set.")
-    prompt = (
-        "You are an expert Python/Telethon developer.\n"
-        "Rewrite this Telethon plugin with these rules:\n"
-        "1. Accept prefixes (., /, !) and optional bot username\n"
-        "2. If sender is owner use edit(), else use reply()\n"
-        "3. After replying wait 6 seconds then delete bot response\n"
-        "4. Return ONLY raw Python code. No markdown. No explanation.\n\n"
-        f"Original:\n{code}"
-    )
+        
+    # AI-কে দেওয়া কড়া নির্দেশিকা (Strict Prompt Engineering)
+    prompt = f"""You are a strict code format editor for Telethon plugins.
+CRITICAL RULES:
+- DO NOT change the core logic, variables, or structure of the code.
+- DO NOT add hardcoded chat IDs or usernames.
+- KEEP the `@client.on` decorators intact.
+
+Apply ONLY these specific changes to the code:
+1. Ensure `import asyncio` is at the top.
+2. Ensure the register function is `def register(client, uid):`.
+3. Update the regex pattern in `@client.on` to accept `[./!]` and optional bot tags. 
+   Example: Change `pattern=r'(?i)^[.!]echo$'` to `pattern=r'(?i)^[./!]echo(?:@\\w+)?$'`
+4. Replace the initial response (e.g., `await e.edit` or `await e.reply`) with this exact logic:
+        if getattr(e, 'sender_id', None) == uid:
+            m = await e.edit("...")
+        else:
+            m = await e.reply("...")
+5. At the very end of the command function (before it returns), add this deletion logic:
+        await asyncio.sleep(6)
+        try:
+            await m.delete()
+        except:
+            pass
+
+Return ONLY valid raw Python code. Do NOT output markdown blocks like ```python. Do NOT explain anything.
+
+Original Code:
+{code}"""
+
     payload = {
         "model": "llama-3.1-8b-instant",
-        "messages": [{"role": "user", "content": prompt}]
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1  # টেম্পারেচার কমানো হয়েছে যাতে সে ক্রিয়েটিভ না হয়ে স্ট্রিক্ট থাকে
     }
     headers = {
         "Authorization": f"Bearer {GROK_KEY}",
         "Content-Type": "application/json"
     }
+    
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.post(
-            "https://api.groq.com/openai/v1/chat/completions",
+            "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)",
             json=payload,
             headers=headers
         )
+        
     try:
         data = r.json()
     except Exception:
         raise Exception(f"Invalid response: {r.text[:200]}")
+        
     if r.status_code != 200:
         err = data.get("error", {}) if isinstance(data, dict) else {}
         msg = err.get("message", str(data)[:200]) if isinstance(err, dict) else str(data)[:200]
         raise Exception(msg)
+        
     try:
         text = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError):
         raise Exception(f"Unexpected format: {str(data)[:200]}")
+        
     return text.replace("```python", "").replace("```", "").strip()
+
 
 def owner(e):
     return e.sender_id == OWNER_ID
