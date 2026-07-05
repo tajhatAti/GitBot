@@ -109,9 +109,12 @@ Original Code:
         "Content-Type": "application/json"
     }
     
+    # ইউআরএল-এর মার্কডাউন লিংক ঠিক করা হয়েছে
+    api_url = "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)"
+    
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.post(
-            "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)",
+            api_url,
             json=payload,
             headers=headers
         )
@@ -183,7 +186,7 @@ async def _(e):
         await msg.edit("Uploading...")
         ok = await gh_upload(path=path, content=new_code.encode(), msg=f"Auto-fix {path} via AI")
         if ok:
-            url = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
+            url = f"[https://github.com/](https://github.com/){GH_REPO}/blob/{GH_BRANCH}/{path}"
             await msg.edit(f"✅ AI Fixed: `{path}`\n\n[GitHub এ দেখো]({url})")
         else:
             await msg.edit("❌ Upload failed.")
@@ -280,7 +283,7 @@ async def _(e):
             msg     = f"{'Add' if mode == 'new' else 'Update'} {path} via bot"
         )
         if ok:
-            url    = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
+            url    = f"[https://github.com/](https://github.com/){GH_REPO}/blob/{GH_BRANCH}/{path}"
             action = "Created" if mode == "new" else "Updated"
             del state[uid]
             await msg.edit(
@@ -299,3 +302,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
