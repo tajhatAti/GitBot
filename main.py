@@ -2,14 +2,14 @@ import os, asyncio, base64, threading, httpx
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events
 
-API_ID         = int(os.environ.get("API_ID", "12345"))
-API_HASH       = os.environ.get("API_HASH", "placeholder")
-BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
-GH_TOKEN       = os.environ.get("GH_TOKEN", "")
-GH_REPO        = os.environ.get("GH_REPO", "tajhatAti/Bot")
-GH_BRANCH      = os.environ.get("GH_BRANCH", "main")
-OWNER_ID       = int(os.environ.get("OWNER_ID", 0))
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+API_ID    = int(os.environ.get("API_ID", "12345"))
+API_HASH  = os.environ.get("API_HASH", "placeholder")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+GH_TOKEN  = os.environ.get("GH_TOKEN", "")
+GH_REPO   = os.environ.get("GH_REPO", "tajhatAti/Bot")
+GH_BRANCH = os.environ.get("GH_BRANCH", "main")
+OWNER_ID  = int(os.environ.get("OWNER_ID", 0))
+GROK_KEY  = os.environ.get("GROK_API_KEY", "")
 
 BASE   = "plugins"
 GH_API = "https://api.github.com"
@@ -66,36 +66,41 @@ async def gh_delete(path: str) -> bool:
         r = await c.delete(url, headers=gh_headers(), json=data)
         return r.status_code == 200
 
-async def gemini_fix(code: str) -> str:
-    if not GEMINI_API_KEY:
-        raise Exception("GEMINI_API_KEY not set")
+async def ai_fix(code: str) -> str:
+    if not GROK_KEY:
+        raise Exception("GROK_API_KEY not set in environment.")
     prompt = (
         "You are an expert Python/Telethon developer.\n"
-        "Rewrite this Telethon plugin code with these rules:\n"
+        "Rewrite this Telethon plugin with these rules:\n"
         "1. Accept prefixes (., /, !) and optional bot username in pattern\n"
         "2. If sender is owner use edit(), else use reply()\n"
-        "3. After replying, wait 6 seconds then delete the bot response\n"
+        "3. After replying wait 6 seconds then delete bot response\n"
         "4. Return ONLY raw Python code. No markdown. No explanation.\n\n"
-        f"Original code:\n{code}"
+        f"Original:\n{code}"
     )
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    )
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.post(url, json=payload)
+    payload = {
+        "model": "grok-3-mini",
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    headers = {
+        "Authorization": f"Bearer {GROK_KEY}",
+        "Content-Type": "application/json"
+    }
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(
+            "https://api.x.ai/v1/chat/completions",
+            json=payload,
+            headers=headers
+        )
         data = r.json()
     if r.status_code != 200:
         raise Exception(data.get("error", {}).get("message", str(data)))
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
-    text = text.replace("```python", "").replace("```", "").strip()
-    return text
+    text = data["choices"][0]["message"]["content"]
+    return text.replace("```python", "").replace("```", "").strip()
 
 def owner(e):
     return e.sender_id == OWNER_ID
 
-# ── /start ────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern="^/start$"))
 async def _(e):
     if not owner(e): return
@@ -111,21 +116,18 @@ async def _(e):
         "`/cancel` — বাতিল"
     )
 
-# ── /new ──────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern="^/new$"))
 async def _(e):
     if not owner(e): return
     state[e.sender_id] = {"step": "filename", "mode": "new"}
     await e.reply("📁 File name দাও:\n_(example: `ping.py`)_")
 
-# ── /edit ─────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern="^/edit$"))
 async def _(e):
     if not owner(e): return
     state[e.sender_id] = {"step": "filename", "mode": "edit"}
     await e.reply("✏️ File name দাও:\n_(example: `ping.py`)_")
 
-# ── /auto_fix ─────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/auto_fix (.+)"))
 async def _(e):
     if not owner(e): return
@@ -136,9 +138,9 @@ async def _(e):
         await msg.edit(f"❌ Not found: `{path}`")
         return
     old_code = base64.b64decode(existing["content"]).decode(errors="replace")
-    await msg.edit("🧠 AI analyzing...")
+    await msg.edit("🧠 AI analyzing and fixing...")
     try:
-        new_code = await gemini_fix(old_code)
+        new_code = await ai_fix(old_code)
         if not new_code or len(new_code) < 10:
             await msg.edit("❌ AI invalid response.")
             return
@@ -146,19 +148,16 @@ async def _(e):
         ok = await gh_upload(
             path    = path,
             content = new_code.encode(),
-            msg     = f"Auto-fix {path} via Gemini AI"
+            msg     = f"Auto-fix {path} via AI"
         )
         if ok:
             url = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
-            await msg.edit(
-                f"✅ AI Fixed: `{path}`\n\n[GitHub এ দেখো]({url})"
-            )
+            await msg.edit(f"✅ AI Fixed: `{path}`\n\n[GitHub এ দেখো]({url})")
         else:
             await msg.edit("❌ Upload failed.")
     except Exception as ex:
         await msg.edit(f"❌ AI Error: `{ex}`")
 
-# ── /rem ──────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/rem (.+)"))
 async def _(e):
     if not owner(e): return
@@ -167,7 +166,6 @@ async def _(e):
     ok   = await gh_delete(path)
     await msg.edit(f"✅ Deleted: `{path}`" if ok else f"❌ Not found: `{path}`")
 
-# ── /ls ───────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/ls(.*)"))
 async def _(e):
     if not owner(e): return
@@ -186,7 +184,6 @@ async def _(e):
     lines = [("📁 " if i["type"] == "dir" else "📄 ") + f"`{i['name']}`" for i in items]
     await e.reply(f"**{path}/**\n\n" + "\n".join(lines) if lines else f"**{path}/** is empty.")
 
-# ── /cat ──────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/cat (.+)"))
 async def _(e):
     if not owner(e): return
@@ -200,7 +197,6 @@ async def _(e):
         content = content[:3800] + "\n...(truncated)"
     await e.reply(f"```\n{content}\n```")
 
-# ── /cancel ───────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern="^/cancel$"))
 async def _(e):
     if not owner(e): return
@@ -210,7 +206,6 @@ async def _(e):
     else:
         await e.reply("কোনো active action নেই।")
 
-# ── TEXT HANDLER ──────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(func=lambda e: e.sender_id == OWNER_ID and bool(e.text) and not e.text.startswith("/")))
 async def _(e):
     uid  = e.sender_id
@@ -272,7 +267,6 @@ async def _(e):
             await msg.edit("❌ Failed. GH_TOKEN এর `repo` permission চেক করো।")
         return
 
-# ── BOOTSTRAP ─────────────────────────────────────────────────────────────────
 async def main():
     threading.Thread(target=run_server, daemon=True).start()
     await bot.start(bot_token=BOT_TOKEN)
