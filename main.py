@@ -92,12 +92,25 @@ async def ai_fix(code: str) -> str:
             json=payload,
             headers=headers
         )
+    try:
         data = r.json()
-    if r.status_code != 200:
-        raise Exception(data.get("error", {}).get("message", str(data)))
-    text = data["choices"][0]["message"]["content"]
-    return text.replace("```python", "").replace("```", "").strip()
+    except Exception:
+        raise Exception(f"Invalid response: {r.text[:200]}")
 
+    if r.status_code != 200:
+        if isinstance(data, dict):
+            err = data.get("error", {})
+            if isinstance(err, dict):
+                raise Exception(err.get("message", str(data)))
+            raise Exception(str(err))
+        raise Exception(str(data)[:200])
+
+    try:
+        text = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError) as ex:
+        raise Exception(f"Unexpected response format: {str(data)[:200]}")
+
+    return text.replace("```python", "").replace("```", "").strip()
 def owner(e):
     return e.sender_id == OWNER_ID
 
