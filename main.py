@@ -67,7 +67,6 @@ async def gh_delete(path: str) -> bool:
         return r.status_code == 200
 
 async def ai_fix(code: str) -> str:
-async def ai_fix(code: str) -> str:
     if not GROK_KEY:
         raise Exception("GROK_API_KEY not set.")
     prompt = (
@@ -97,17 +96,16 @@ async def ai_fix(code: str) -> str:
         data = r.json()
     except Exception:
         raise Exception(f"Invalid response: {r.text[:200]}")
-
     if r.status_code != 200:
         err = data.get("error", {}) if isinstance(data, dict) else {}
-        raise Exception(err.get("message", str(data)[:200]) if isinstance(err, dict) else str(data)[:200])
-
+        msg = err.get("message", str(data)[:200]) if isinstance(err, dict) else str(data)[:200]
+        raise Exception(msg)
     try:
         text = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError):
         raise Exception(f"Unexpected format: {str(data)[:200]}")
-
     return text.replace("```python", "").replace("```", "").strip()
+
 def owner(e):
     return e.sender_id == OWNER_ID
 
@@ -148,18 +146,14 @@ async def _(e):
         await msg.edit(f"❌ Not found: `{path}`")
         return
     old_code = base64.b64decode(existing["content"]).decode(errors="replace")
-    await msg.edit("🧠 AI analyzing and fixing...")
+    await msg.edit("🧠 AI analyzing...")
     try:
         new_code = await ai_fix(old_code)
         if not new_code or len(new_code) < 10:
             await msg.edit("❌ AI invalid response.")
             return
-        await msg.edit("Uploading fixed code...")
-        ok = await gh_upload(
-            path    = path,
-            content = new_code.encode(),
-            msg     = f"Auto-fix {path} via AI"
-        )
+        await msg.edit("Uploading...")
+        ok = await gh_upload(path=path, content=new_code.encode(), msg=f"Auto-fix {path} via AI")
         if ok:
             url = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
             await msg.edit(f"✅ AI Fixed: `{path}`\n\n[GitHub এ দেখো]({url})")
@@ -220,11 +214,9 @@ async def _(e):
 async def _(e):
     uid  = e.sender_id
     text = e.text.strip()
-
     if uid not in state:
         await e.reply("কোনো action নেই।\n`/new` বা `/edit` দিয়ে শুরু করো।")
         return
-
     s    = state[uid]
     step = s["step"]
     mode = s["mode"]
@@ -232,7 +224,6 @@ async def _(e):
     if step == "filename":
         path      = full_path(text)
         s["path"] = path
-
         if mode == "edit":
             msg      = await e.reply(f"Fetching `{path}`...")
             existing = await gh_get(path)
@@ -244,16 +235,12 @@ async def _(e):
             preview = content[:3500] + "\n...(truncated)" if len(content) > 3500 else content
             s["step"] = "edit_content"
             await msg.edit(
-                f"📄 `{path}` current content:\n\n"
-                f"```\n{preview}\n```\n\n"
-                f"Edited code plain text এ পাঠাও।\n/cancel বাতিল।"
+                f"📄 `{path}`:\n\n```\n{preview}\n```\n\n"
+                f"Edited code পাঠাও।\n/cancel বাতিল।"
             )
         else:
             s["step"] = "content"
-            await e.reply(
-                f"✅ File: `{path}`\n\n"
-                f"Code plain text এ পাঠাও।\n/cancel বাতিল।"
-            )
+            await e.reply(f"✅ File: `{path}`\n\nCode পাঠাও।\n/cancel বাতিল।")
         return
 
     if step in ("content", "edit_content"):
@@ -275,7 +262,6 @@ async def _(e):
             )
         else:
             await msg.edit("❌ Failed. GH_TOKEN এর `repo` permission চেক করো।")
-        return
 
 async def main():
     threading.Thread(target=run_server, daemon=True).start()
