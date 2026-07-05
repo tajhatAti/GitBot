@@ -67,19 +67,20 @@ async def gh_delete(path: str) -> bool:
         return r.status_code == 200
 
 async def ai_fix(code: str) -> str:
+async def ai_fix(code: str) -> str:
     if not GROK_KEY:
-        raise Exception("GROK_API_KEY not set in environment.")
+        raise Exception("GROK_API_KEY not set.")
     prompt = (
         "You are an expert Python/Telethon developer.\n"
         "Rewrite this Telethon plugin with these rules:\n"
-        "1. Accept prefixes (., /, !) and optional bot username in pattern\n"
+        "1. Accept prefixes (., /, !) and optional bot username\n"
         "2. If sender is owner use edit(), else use reply()\n"
         "3. After replying wait 6 seconds then delete bot response\n"
         "4. Return ONLY raw Python code. No markdown. No explanation.\n\n"
         f"Original:\n{code}"
     )
     payload = {
-        "model": "grok-3-mini",
+        "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt}]
     }
     headers = {
@@ -88,7 +89,7 @@ async def ai_fix(code: str) -> str:
     }
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.post(
-            "https://api.x.ai/v1/chat/completions",
+            "https://api.groq.com/openai/v1/chat/completions",
             json=payload,
             headers=headers
         )
@@ -98,17 +99,13 @@ async def ai_fix(code: str) -> str:
         raise Exception(f"Invalid response: {r.text[:200]}")
 
     if r.status_code != 200:
-        if isinstance(data, dict):
-            err = data.get("error", {})
-            if isinstance(err, dict):
-                raise Exception(err.get("message", str(data)))
-            raise Exception(str(err))
-        raise Exception(str(data)[:200])
+        err = data.get("error", {}) if isinstance(data, dict) else {}
+        raise Exception(err.get("message", str(data)[:200]) if isinstance(err, dict) else str(data)[:200])
 
     try:
         text = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError) as ex:
-        raise Exception(f"Unexpected response format: {str(data)[:200]}")
+    except (KeyError, IndexError):
+        raise Exception(f"Unexpected format: {str(data)[:200]}")
 
     return text.replace("```python", "").replace("```", "").strip()
 def owner(e):
