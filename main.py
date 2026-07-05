@@ -69,73 +69,57 @@ async def gh_delete(path: str) -> bool:
 async def ai_fix(code: str) -> str:
     if not GROK_KEY:
         raise Exception("GROK_API_KEY not set.")
-        
-    # AI-কে দেওয়া কড়া নির্দেশিকা (Strict Prompt Engineering)
-    prompt = f"""You are a strict code format editor for Telethon plugins.
-CRITICAL RULES:
-- DO NOT change the core logic, variables, or structure of the code.
-- DO NOT add hardcoded chat IDs or usernames.
-- KEEP the `@client.on` decorators intact.
-
-Apply ONLY these specific changes to the code:
-1. Ensure `import asyncio` is at the top.
-2. Ensure the register function is `def register(client, uid):`.
-3. Update the regex pattern in `@client.on` to accept `[./!]` and optional bot tags. 
-   Example: Change `pattern=r'(?i)^[.!]echo$'` to `pattern=r'(?i)^[./!]echo(?:@\\w+)?$'`
-4. Replace the initial response (e.g., `await e.edit` or `await e.reply`) with this exact logic:
-        if getattr(e, 'sender_id', None) == uid:
-            m = await e.edit("...")
-        else:
-            m = await e.reply("...")
-5. At the very end of the command function (before it returns), add this deletion logic:
-        await asyncio.sleep(6)
-        try:
-            await m.delete()
-        except:
-            pass
-
-Return ONLY valid raw Python code. Do NOT output markdown blocks like ```python. Do NOT explain anything.
-
-Original Code:
-{code}"""
-
+    prompt = (
+        "You are a strict code format editor for Telethon plugins.\n"
+        "CRITICAL RULES:\n"
+        "- DO NOT change the core logic, variables, or structure.\n"
+        "- KEEP the @client.on decorators intact.\n\n"
+        "Apply ONLY these changes:\n"
+        "1. Ensure import asyncio is at the top.\n"
+        "2. Ensure register function is def register(client, uid):\n"
+        "3. Update regex pattern to accept [./!] and optional bot tags.\n"
+        "4. Replace initial response with:\n"
+        "        if getattr(e, 'sender_id', None) == uid:\n"
+        "            m = await e.edit('...')\n"
+        "        else:\n"
+        "            m = await e.reply('...')\n"
+        "5. At end of command function add:\n"
+        "        await asyncio.sleep(6)\n"
+        "        try:\n"
+        "            await m.delete()\n"
+        "        except:\n"
+        "            pass\n\n"
+        "Return ONLY valid raw Python code. No markdown. No explanation.\n\n"
+        f"Original Code:\n{code}"
+    )
     payload = {
         "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1  # টেম্পারেচার কমানো হয়েছে যাতে সে ক্রিয়েটিভ না হয়ে স্ট্রিক্ট থাকে
+        "temperature": 0.1
     }
     headers = {
         "Authorization": f"Bearer {GROK_KEY}",
         "Content-Type": "application/json"
     }
-    
-    # ইউআরএল-এর মার্কডাউন লিংক ঠিক করা হয়েছে
-    api_url = "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)"
-    
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.post(
-            api_url,
+            "https://api.groq.com/openai/v1/chat/completions",
             json=payload,
             headers=headers
         )
-        
     try:
         data = r.json()
     except Exception:
         raise Exception(f"Invalid response: {r.text[:200]}")
-        
     if r.status_code != 200:
         err = data.get("error", {}) if isinstance(data, dict) else {}
         msg = err.get("message", str(data)[:200]) if isinstance(err, dict) else str(data)[:200]
         raise Exception(msg)
-        
     try:
         text = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError):
         raise Exception(f"Unexpected format: {str(data)[:200]}")
-        
     return text.replace("```python", "").replace("```", "").strip()
-
 
 def owner(e):
     return e.sender_id == OWNER_ID
@@ -159,7 +143,7 @@ async def _(e):
 async def _(e):
     if not owner(e): return
     state[e.sender_id] = {"step": "filename", "mode": "new"}
-    await e.reply("📁 File's 🗃️ name দাও:\n_(example: `ping.py`)_")
+    await e.reply("📁 File name দাও:\n_(example: `ping.py`)_")
 
 @bot.on(events.NewMessage(pattern="^/edit$"))
 async def _(e):
@@ -184,9 +168,13 @@ async def _(e):
             await msg.edit("❌ AI invalid response.")
             return
         await msg.edit("Uploading...")
-        ok = await gh_upload(path=path, content=new_code.encode(), msg=f"Auto-fix {path} via AI")
+        ok = await gh_upload(
+            path    = path,
+            content = new_code.encode(),
+            msg     = f"Auto-fix {path} via AI"
+        )
         if ok:
-            url = f"[https://github.com/](https://github.com/){GH_REPO}/blob/{GH_BRANCH}/{path}"
+            url = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
             await msg.edit(f"✅ AI Fixed: `{path}`\n\n[GitHub এ দেখো]({url})")
         else:
             await msg.edit("❌ Upload failed.")
@@ -283,7 +271,7 @@ async def _(e):
             msg     = f"{'Add' if mode == 'new' else 'Update'} {path} via bot"
         )
         if ok:
-            url    = f"[https://github.com/](https://github.com/){GH_REPO}/blob/{GH_BRANCH}/{path}"
+            url    = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
             action = "Created" if mode == "new" else "Updated"
             del state[uid]
             await msg.edit(
@@ -302,4 +290,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
