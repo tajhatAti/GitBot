@@ -1,13 +1,7 @@
-import os
-import asyncio
-import base64
-import threading
-import httpx
-import google.generativeai as genai
+import os, asyncio, base64, threading, httpx
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events
 
-# ── ENVIRONMENT VARIABLES ──
 API_ID         = int(os.environ.get("API_ID", "12345"))
 API_HASH       = os.environ.get("API_HASH", "placeholder")
 BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
@@ -15,13 +9,11 @@ GH_TOKEN       = os.environ.get("GH_TOKEN", "")
 GH_REPO        = os.environ.get("GH_REPO", "tajhatAti/Bot")
 GH_BRANCH      = os.environ.get("GH_BRANCH", "main")
 OWNER_ID       = int(os.environ.get("OWNER_ID", 0))
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")  # এখানে শুরুতে ডিফাইন করে দিলাম
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 BASE   = "plugins"
 GH_API = "https://api.github.com"
-
-# state[uid] = {"step": "filename"|"content"|"edit_content", "path": "..."}
-state = {}
+state  = {}
 
 bot = TelegramClient("github_bot", API_ID, API_HASH)
 
@@ -74,6 +66,32 @@ async def gh_delete(path: str) -> bool:
         r = await c.delete(url, headers=gh_headers(), json=data)
         return r.status_code == 200
 
+async def gemini_fix(code: str) -> str:
+    if not GEMINI_API_KEY:
+        raise Exception("GEMINI_API_KEY not set")
+    prompt = (
+        "You are an expert Python/Telethon developer.\n"
+        "Rewrite this Telethon plugin code with these rules:\n"
+        "1. Accept prefixes (., /, !) and optional bot username in pattern\n"
+        "2. If sender is owner use edit(), else use reply()\n"
+        "3. After replying, wait 6 seconds then delete the bot response\n"
+        "4. Return ONLY raw Python code. No markdown. No explanation.\n\n"
+        f"Original code:\n{code}"
+    )
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    )
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(url, json=payload)
+        data = r.json()
+    if r.status_code != 200:
+        raise Exception(data.get("error", {}).get("message", str(data)))
+    text = data["candidates"][0]["content"]["parts"][0]["text"]
+    text = text.replace("```python", "").replace("```", "").strip()
+    return text
+
 def owner(e):
     return e.sender_id == OWNER_ID
 
@@ -82,79 +100,16 @@ def owner(e):
 async def _(e):
     if not owner(e): return
     await e.reply(
-        "**GitHub File Manager & AI Auto-Fixer**\n"
-        f"Base path: `{BASE}/`\n\n"
-        "Commands:\n"
-        "`/new` — নতুন file create\n"
-        "`/edit` — existing file edit\n"
-        "`/auto_fix filename.py` — 🧠 AI দিয়ে কোড অটো-ফিক্স\n"
-        "`/rem filename.py` — file delete\n"
-        "`/ls` — সব file দেখো\n"
+        "**GitHub File Manager + AI Fixer**\n"
+        f"Base: `{BASE}/`\n\n"
+        "`/new` — নতুন file\n"
+        "`/edit` — file edit\n"
+        "`/auto_fix filename.py` — AI দিয়ে fix\n"
+        "`/rem filename.py` — delete\n"
+        "`/ls` — file list\n"
         "`/cat filename.py` — content দেখো\n"
         "`/cancel` — বাতিল"
     )
-
-# ── /auto_fix (AI Powered Code Editor) ────────────────────────────────────────
-@bot.on(events.NewMessage(pattern=r"^/auto_fix (.+)"))
-async def auto_fix_cmd(e):
-    if not owner(e): return
-    
-    if not GEMINI_API_KEY:
-        return await e.reply("❌ `GEMINI_API_KEY` এনভায়রনমেন্ট ভেরিয়েবলে সেট করা নেই!")
-        
-    path = full_path(e.pattern_match.group(1).strip())
-    msg = await e.reply(f"Fetching `{path}` for AI magic...")
-    
-    existing = await gh_get(path)
-    if not existing or "content" not in existing:
-        return await msg.edit(f"❌ Not found: `{path}`")
-        
-    old_code = base64.b64decode(existing["content"]).decode(errors="replace")
-    await msg.edit("🧠 AI is analyzing and rewriting the code...")
-    
-    try:
-        # জেমিনি কনফিগারেশন (ফাইলের শুরুর ভেরিয়েবলটি ব্যবহার করা হয়েছে)
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(
-    model_name="models/gemini-1.5-flash",
-    generation_config={"api_version": "v1beta"}
-        )
-        
-        prompt = f"""
-        You are an expert Python developer working with Telethon.
-        Rewrite the provided Telethon plugin code according to these exact rules:
-        1. Change the event pattern to accept prefixes (., /, !) and optional bot tags: (?i)^[./!]<command_name>(?:@\\w+)?$
-        2. Make it public. If sender is `uid`, use `edit()`. Otherwise, use `reply()`. Example: 
-           if getattr(e, 'sender_id', None) == uid: m = await e.edit(...) else: m = await e.reply(...)
-        3. Add asyncio.sleep(6) at the end, then delete the bot's response message safely. Make sure `import asyncio` is at the top.
-        4. Return ONLY the raw valid Python code. Do not include markdown blocks like ```python. Do not explain anything.
-        
-        Original Code:
-        {old_code}
-        """
-        
-        res = model.generate_content(prompt)
-        new_code = res.text.replace('```python', '').replace('```', '').strip()
-        
-        if not new_code or len(new_code) < 10:
-            return await msg.edit("❌ AI failed to generate valid code.")
-            
-        await msg.edit("✅ AI rewrite complete. Uploading to GitHub...")
-        
-        ok = await gh_upload(
-            path=path,
-            content=new_code.encode(),
-            msg=f"Auto-fixed {path} via Gemini AI"
-        )
-        
-        if ok:
-            url = f"[https://github.com/](https://github.com/){GH_REPO}/blob/{GH_BRANCH}/{path}"
-            await msg.edit(f"🎉 **Successfully Auto-Fixed via AI:** `{path}`\n\n[GitHub এ দেখো]({url})")
-        else:
-            await msg.edit("❌ Failed to upload to GitHub.")
-            
-    except Exception as ex:
-        await msg.edit(f"❌ AI Error: `{ex}`")
 
 # ── /new ──────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern="^/new$"))
@@ -168,7 +123,40 @@ async def _(e):
 async def _(e):
     if not owner(e): return
     state[e.sender_id] = {"step": "filename", "mode": "edit"}
-    await e.reply("✏️ Edit করতে file name দাও:\n_(example: `ping.py`)_")
+    await e.reply("✏️ File name দাও:\n_(example: `ping.py`)_")
+
+# ── /auto_fix ─────────────────────────────────────────────────────────────────
+@bot.on(events.NewMessage(pattern=r"^/auto_fix (.+)"))
+async def _(e):
+    if not owner(e): return
+    path = full_path(e.pattern_match.group(1).strip())
+    msg  = await e.reply(f"Fetching `{path}`...")
+    existing = await gh_get(path)
+    if not existing or "content" not in existing:
+        await msg.edit(f"❌ Not found: `{path}`")
+        return
+    old_code = base64.b64decode(existing["content"]).decode(errors="replace")
+    await msg.edit("🧠 AI analyzing...")
+    try:
+        new_code = await gemini_fix(old_code)
+        if not new_code or len(new_code) < 10:
+            await msg.edit("❌ AI invalid response.")
+            return
+        await msg.edit("Uploading fixed code...")
+        ok = await gh_upload(
+            path    = path,
+            content = new_code.encode(),
+            msg     = f"Auto-fix {path} via Gemini AI"
+        )
+        if ok:
+            url = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
+            await msg.edit(
+                f"✅ AI Fixed: `{path}`\n\n[GitHub এ দেখো]({url})"
+            )
+        else:
+            await msg.edit("❌ Upload failed.")
+    except Exception as ex:
+        await msg.edit(f"❌ AI Error: `{ex}`")
 
 # ── /rem ──────────────────────────────────────────────────────────────────────
 @bot.on(events.NewMessage(pattern=r"^/rem (.+)"))
@@ -237,15 +225,14 @@ async def _(e):
     mode = s["mode"]
 
     if step == "filename":
-        path       = full_path(text)
-        s["path"]  = path
-        s["step"]  = "content"
+        path      = full_path(text)
+        s["path"] = path
 
         if mode == "edit":
             msg      = await e.reply(f"Fetching `{path}`...")
             existing = await gh_get(path)
             if not existing or "content" not in existing:
-                await msg.edit(f"❌ Not found: `{path}`\n\nআবার চেষ্টা করো বা /cancel দাও।")
+                await msg.edit(f"❌ Not found: `{path}`\n/cancel দাও বা আবার চেষ্টা করো।")
                 del state[uid]
                 return
             content = base64.b64decode(existing["content"]).decode(errors="replace")
@@ -257,6 +244,7 @@ async def _(e):
                 f"Edited code plain text এ পাঠাও।\n/cancel বাতিল।"
             )
         else:
+            s["step"] = "content"
             await e.reply(
                 f"✅ File: `{path}`\n\n"
                 f"Code plain text এ পাঠাও।\n/cancel বাতিল।"
@@ -272,13 +260,13 @@ async def _(e):
             msg     = f"{'Add' if mode == 'new' else 'Update'} {path} via bot"
         )
         if ok:
-            url    = f"[https://github.com/](https://github.com/){GH_REPO}/blob/{GH_BRANCH}/{path}"
+            url    = f"https://github.com/{GH_REPO}/blob/{GH_BRANCH}/{path}"
             action = "Created" if mode == "new" else "Updated"
             del state[uid]
             await msg.edit(
                 f"✅ {action}: `{path}`\n\n"
                 f"[GitHub এ দেখো]({url})\n\n"
-                f"নতুন file: `/new`\nEdit: `/edit`"
+                f"নতুন file: `/new` | Edit: `/edit`"
             )
         else:
             await msg.edit("❌ Failed. GH_TOKEN এর `repo` permission চেক করো।")
